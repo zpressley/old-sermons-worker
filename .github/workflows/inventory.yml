@@ -15,7 +15,7 @@ jobs:
   plan:
     runs-on: ubuntu-latest
     outputs:
-      folders: ${{ steps.list.outputs.folders }}
+      indexes: ${{ steps.list.outputs.indexes }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -27,10 +27,16 @@ jobs:
         env:
           GOOGLE_SA_KEY: ${{ secrets.GOOGLE_SA_KEY }}
           DRIVE_ID: ${{ inputs.drive_id }}
+        # Only plain numbers go in the job output: GitHub blanks outputs that contain any line of a secret
+        # (a pretty-printed key file has lines like "{"), so the folder list travels as an artifact.
         run: |
-          folders=$(cd worker && python inventory.py plan "$DRIVE_ID")
-          echo "$folders"
-          echo "folders=$folders" >> "$GITHUB_OUTPUT"
+          (cd worker && python inventory.py plan "$DRIVE_ID") > folders.json
+          cat folders.json
+          echo "indexes=$(python -c 'import json;print(json.dumps(list(range(len(json.load(open("folders.json")))))))')" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: folders
+          path: folders.json
 
   folder:
     needs: plan
@@ -39,8 +45,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        folder: ${{ fromJSON(needs.plan.outputs.folders) }}
-    name: ${{ matrix.folder.name }}
+        index: ${{ fromJSON(needs.plan.outputs.indexes) }}
+    name: folder ${{ matrix.index }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -48,16 +54,20 @@ jobs:
           python-version: '3.12'
           cache: pip
       - run: pip install -q -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: folders
       - env:
           GOOGLE_SA_KEY: ${{ secrets.GOOGLE_SA_KEY }}
           DRIVE_ID: ${{ inputs.drive_id }}
-          FOLDER_ID: ${{ matrix.folder.id }}
+          INDEX: ${{ matrix.index }}
         run: |
           mkdir -p results
-          cd worker && python inventory.py folder "$DRIVE_ID" "$FOLDER_ID" "../results/inv-$FOLDER_ID.csv"
+          FOLDER_ID=$(python -c "import json,os;print(json.load(open('folders.json'))[int(os.environ['INDEX'])]['id'])")
+          cd worker && python inventory.py folder "$DRIVE_ID" "$FOLDER_ID" "../results/inv-$INDEX.csv"
       - uses: actions/upload-artifact@v4
         with:
-          name: inv-${{ matrix.folder.id }}
+          name: inv-${{ matrix.index }}
           path: results/
 
   merge:
