@@ -7,7 +7,7 @@ on:
         description: Run ID of the "Inventory old sermon audio" run to use (from its URL)
         required: true
       limit_batches:
-        description: Only the first N zips/files (0 = all). Use a small number for a timing test.
+        description: Only N zips/files spread across the years (0 = all). Use a small number for a timing test.
         required: true
         default: '3'
       shares:
@@ -53,7 +53,8 @@ jobs:
           b = json.load(open("inventory/batches.json"))
           limit = int(os.environ["LIMIT"])
           if limit > 0:
-              b = b[:limit]
+              step = max(1, len(b) // limit)
+              b = b[::step][:limit]
           n = max(1, min(int(os.environ["SHARES"]), 20, len(b)))
           json.dump(b, open("batches.json", "w"))
           files = sum(len(x["files"]) for x in b)
