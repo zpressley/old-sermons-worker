@@ -1,0 +1,136 @@
+name: Transcribe sermon openings
+
+on:
+  workflow_dispatch:
+    inputs:
+      inventory_run_id:
+        description: Run ID of the "Inventory old sermon audio" run to use (from its URL)
+        required: true
+      limit_batches:
+        description: Only the first N zips/files (0 = all). Use a small number for a timing test.
+        required: true
+        default: '3'
+      shares:
+        description: Parallel jobs (max 20)
+        required: true
+        default: '20'
+      model:
+        description: Whisper model (base.en is fast; small.en is more accurate, ~2.5x slower)
+        required: true
+        default: base.en
+      long_minutes:
+        description: Minutes to transcribe from 60+ minute recordings (whole services)
+        required: true
+        default: '35'
+      short_minutes:
+        description: Minutes to transcribe from shorter recordings (sermon only)
+        required: true
+        default: '12'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      shares: ${{ steps.p.outputs.shares }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: inventory
+          path: inventory
+          run-id: ${{ inputs.inventory_run_id }}
+          github-token: ${{ github.token }}
+      - id: p
+        env:
+          LIMIT: ${{ inputs.limit_batches }}
+          SHARES: ${{ inputs.shares }}
+        run: |
+          python3 - <<'EOF'
+          import json, os
+          b = json.load(open("inventory/batches.json"))
+          limit = int(os.environ["LIMIT"])
+          if limit > 0:
+              b = b[:limit]
+          n = max(1, min(int(os.environ["SHARES"]), 20, len(b)))
+          json.dump(b, open("batches.json", "w"))
+          files = sum(len(x["files"]) for x in b)
+          print(f"{len(b)} batches, {files} recordings, {n} jobs")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write("shares=" + json.dumps(list(range(n))) + "\n")
+          EOF
+      - uses: actions/upload-artifact@v4
+        with:
+          name: batches-used
+          path: batches.json
+
+  transcribe:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        share: ${{ fromJSON(needs.plan.outputs.shares) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -q -r requirements.txt
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: whisper-${{ inputs.model }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: batches-used
+      - env:
+          GOOGLE_SA_KEY: ${{ secrets.GOOGLE_SA_KEY }}
+          WHISPER_MODEL: ${{ inputs.model }}
+          LONG_MINUTES: ${{ inputs.long_minutes }}
+          SHORT_MINUTES: ${{ inputs.short_minutes }}
+          N: ${{ strategy.job-total }}
+          I: ${{ matrix.share }}
+        run: cd worker && python transcribe.py chunk ../batches.json "$N" "$I" ../transcripts
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: tx-${{ matrix.share }}
+          path: transcripts/
+          if-no-files-found: ignore
+
+  merge:
+    needs: transcribe
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: tx-*
+          merge-multiple: true
+          path: transcripts
+      - run: |
+          python3 - <<'EOF'
+          import csv, glob
+          rows = [r for p in sorted(glob.glob("transcripts/timing-*.csv")) for r in csv.DictReader(open(p))]
+          if rows:
+              with open("transcripts/timing.csv", "w", newline="") as f:
+                  w = csv.DictWriter(f, fieldnames=list(rows[0]))
+                  w.writeheader(); w.writerows(rows)
+          secs = sum(float(r["seconds"]) for r in rows)
+          audio = sum(float(r["window_min"]) for r in rows)
+          msg = f"{len(rows)} recordings transcribed, {secs/60:.0f} job-minutes for {audio:.0f} minutes of audio"
+          if rows:
+              msg += f" ({secs/len(rows)/60:.1f} min each)"
+          print(msg)
+          open(__import__("os").environ["GITHUB_STEP_SUMMARY"], "a").write(msg + "\n")
+          EOF
+          rm -f transcripts/timing-*.csv
+      - uses: actions/upload-artifact@v4
+        with:
+          name: transcripts
+          path: transcripts/

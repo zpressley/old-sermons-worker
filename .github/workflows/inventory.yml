@@ -1,0 +1,85 @@
+name: Inventory old sermon audio
+
+on:
+  workflow_dispatch:
+    inputs:
+      drive_id:
+        description: Shared Drive holding the "20xx Audio" folders
+        required: true
+        default: 0AH3ka1ADYmHpUk9PVA
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      folders: ${{ steps.list.outputs.folders }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -q -r requirements.txt
+      - id: list
+        env:
+          GOOGLE_SA_KEY: ${{ secrets.GOOGLE_SA_KEY }}
+          DRIVE_ID: ${{ inputs.drive_id }}
+        run: |
+          folders=$(cd worker && python inventory.py plan "$DRIVE_ID")
+          echo "$folders"
+          echo "folders=$folders" >> "$GITHUB_OUTPUT"
+
+  folder:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        folder: ${{ fromJSON(needs.plan.outputs.folders) }}
+    name: ${{ matrix.folder.name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -q -r requirements.txt
+      - env:
+          GOOGLE_SA_KEY: ${{ secrets.GOOGLE_SA_KEY }}
+          DRIVE_ID: ${{ inputs.drive_id }}
+          FOLDER_ID: ${{ matrix.folder.id }}
+        run: |
+          mkdir -p results
+          cd worker && python inventory.py folder "$DRIVE_ID" "$FOLDER_ID" "../results/inv-$FOLDER_ID.csv"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: inv-${{ matrix.folder.id }}
+          path: results/
+
+  merge:
+    needs: folder
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -q -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: inv-*
+          merge-multiple: true
+          path: results
+      - run: |
+          cd worker && python inventory.py merge ../results ../inventory
+          { echo '```'; cat ../inventory/summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: inventory
+          path: inventory/

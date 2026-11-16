@@ -1,0 +1,4 @@
+faster-whisper==1.2.1
+mutagen==1.47.0
+google-auth==2.40.3
+requests==2.32.4

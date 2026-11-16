@@ -1,0 +1,9 @@
+__pycache__/
+*.key.json
+*sa-key*.json
+.env
+results/
+inventory/
+transcripts/
+*.mp3
+*.zip
