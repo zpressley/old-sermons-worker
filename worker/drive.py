@@ -78,6 +78,61 @@ def walk(folder_id, drive_id, path=""):
             yield p, f
 
 
+UPLOAD = "https://www.googleapis.com/upload/drive/v3/files"
+
+
+def find_folders(name, drive_id):
+    """Every folder in the Shared Drive with exactly this name."""
+    q = f"name = '{name.replace(chr(39), chr(92) + chr(39))}' and mimeType = '{FOLDER}' and trashed = false"
+    params = {"q": q, "fields": "files(id, name, parents)", "pageSize": 100, "supportsAllDrives": "true",
+              "includeItemsFromAllDrives": "true", "corpora": "drive", "driveId": drive_id}
+    return _get(f"{API}/files", params=params).json().get("files", [])
+
+
+def _post(url, **kw):
+    for attempt in range(8):
+        try:
+            r = session().post(url, timeout=600, **kw)
+        except requests.RequestException:
+            r = None
+        if r is not None and r.status_code < 400:
+            return r
+        retry = r is None or r.status_code == 429 or r.status_code >= 500 or (
+            r.status_code == 403 and "ateLimitExceeded" in r.text)
+        if not retry:
+            raise SystemExit(f"Drive error {r.status_code}: {r.text[:300]}")
+        time.sleep(min(60, 2 ** attempt) + random.random())
+    raise SystemExit(f"Drive kept failing: {url}")
+
+
+def ensure_folder(name, parent_id, drive_id):
+    for f in children(parent_id, drive_id):
+        if f["name"] == name and f["mimeType"] == FOLDER:
+            return f["id"]
+    body = {"name": name, "mimeType": FOLDER, "parents": [parent_id]}
+    return _post(f"{API}/files", params={"supportsAllDrives": "true"}, json=body).json()["id"]
+
+
+def upload(local, name, parent_id, description=""):
+    """Resumable upload of a local MP3; returns the new file id."""
+    meta = {"name": name, "parents": [parent_id], "description": description}
+    size = os.path.getsize(local)
+    start = _post(UPLOAD, params={"uploadType": "resumable", "supportsAllDrives": "true"}, json=meta,
+                  headers={"X-Upload-Content-Type": "audio/mpeg", "X-Upload-Content-Length": str(size)})
+    url = start.headers["Location"]
+    for attempt in range(6):
+        try:
+            with open(local, "rb") as fh:
+                r = session().put(url, data=fh, headers={"Content-Type": "audio/mpeg"}, timeout=1800)
+            if r.status_code < 400:
+                return r.json()["id"]
+            err = f"HTTP {r.status_code}: {r.text[:200]}"
+        except requests.RequestException as e:
+            err = str(e)
+        time.sleep(2 ** attempt + random.random())
+    raise SystemExit(f"upload failed for {name}: {err}")
+
+
 def download(file_id, dest):
     for attempt in range(5):
         try:

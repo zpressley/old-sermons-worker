@@ -1,0 +1,118 @@
+name: Upload recordings to the Sermons drive
+
+on:
+  workflow_dispatch:
+    inputs:
+      inventory_run_id:
+        description: Run ID of the "Inventory old sermon audio" run (its batches.json says where each file is)
+        required: true
+      plan:
+        description: Upload plan in this repo (audio_md5, folder, filename)
+        required: true
+        default: plans/upload-plan.csv
+      dest_drive_id:
+        description: Destination Shared Drive
+        required: true
+        default: 0AC87LG7nwkZpUk9PVA
+      parent_name:
+        description: Existing folder in that drive to put the archive under
+        required: true
+        default: Sermon Audio
+      root_name:
+        description: New folder created under it
+        required: true
+        default: Archive 2012-2020
+      shares:
+        description: Parallel jobs
+        required: true
+        default: '10'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  folders:
+    runs-on: ubuntu-latest
+    outputs:
+      shares: ${{ steps.s.outputs.shares }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -q -r requirements.txt
+      - env:
+          GOOGLE_SA_KEY: ${{ secrets.GOOGLE_SA_KEY }}
+        run: cd worker && python upload.py folders "../${{ inputs.plan }}" "${{ inputs.dest_drive_id }}" "${{ inputs.parent_name }}" "${{ inputs.root_name }}" ../folders.json
+      # Only numbers in job outputs: GitHub blanks outputs containing any line of the (pretty-printed) key.
+      - id: s
+        run: echo "shares=$(python -c 'import json;print(json.dumps(list(range(int("${{ inputs.shares }}")))))')" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dest-folders
+          path: folders.json
+
+  upload:
+    needs: folders
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        share: ${{ fromJSON(needs.folders.outputs.shares) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -q -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: inventory
+          path: inventory
+          run-id: ${{ inputs.inventory_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: dest-folders
+      - env:
+          GOOGLE_SA_KEY: ${{ secrets.GOOGLE_SA_KEY }}
+          DEST_DRIVE_ID: ${{ inputs.dest_drive_id }}
+        run: |
+          mkdir -p results
+          cd worker && python upload.py chunk ../inventory/batches.json "../${{ inputs.plan }}" ../folders.json \
+            "${{ strategy.job-total }}" "${{ matrix.share }}" "../results/uploaded-${{ matrix.share }}.csv"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: up-${{ matrix.share }}
+          path: results/
+          if-no-files-found: ignore
+
+  merge:
+    needs: upload
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: up-*
+          merge-multiple: true
+          path: results
+      - run: |
+          python3 - <<'EOF'
+          import csv, glob, os
+          rows = [r for p in sorted(glob.glob("results/uploaded-*.csv")) for r in csv.DictReader(open(p))]
+          with open("uploaded.csv", "w", newline="") as f:
+              w = csv.DictWriter(f, fieldnames=["audio_md5", "folder", "filename", "file_id"])
+              w.writeheader(); w.writerows(rows)
+          msg = f"{len(rows)} recordings in the Sermons drive"
+          print(msg); open(os.environ["GITHUB_STEP_SUMMARY"], "a").write(msg + "\n")
+          EOF
+      - uses: actions/upload-artifact@v4
+        with:
+          name: uploaded
+          path: uploaded.csv
