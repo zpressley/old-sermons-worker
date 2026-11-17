@@ -15,9 +15,9 @@ on:
         required: true
         default: 0AC87LG7nwkZpUk9PVA
       parent_name:
-        description: Existing folder in that drive to put the archive under
+        description: Existing folder in that drive to put the archive under ("(top)" = top level of the drive)
         required: true
-        default: Sermon Audio
+        default: (top)
       root_name:
         description: New folder created under it
         required: true

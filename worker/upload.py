@@ -19,11 +19,15 @@ def read_plan(p):
 
 
 def cmd_folders(plan_csv, drive_id, parent_name, root_name, out_json):
-    found = find_folders(parent_name, drive_id)
-    if len(found) != 1:
-        top = sorted(f["name"] for f in children(drive_id, drive_id))
-        raise SystemExit(f"expected one folder named {parent_name!r}, found {len(found)}. Top level: {top}")
-    root = ensure_folder(root_name, found[0]["id"], drive_id)
+    if parent_name.strip() in ("", "-", "(top)"):
+        parent = drive_id  # the Shared Drive's top level
+    else:
+        found = find_folders(parent_name, drive_id)
+        if len(found) != 1:
+            top = sorted(f["name"] for f in children(drive_id, drive_id))
+            raise SystemExit(f"expected one folder named {parent_name!r}, found {len(found)}. Top level: {top}")
+        parent = found[0]["id"]
+    root = ensure_folder(root_name, parent, drive_id)
     names = sorted({r["folder"] for r in read_plan(plan_csv).values()})
     ids = {n: ensure_folder(n, root, drive_id) for n in names}
     json.dump({"root": root, "folders": ids}, open(out_json, "w"))
